@@ -1,1 +1,0 @@
-# EVENTOSALIARA Calculadora
