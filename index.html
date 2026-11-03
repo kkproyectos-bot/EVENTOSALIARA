@@ -108,6 +108,7 @@ details[open] summary{margin-bottom:10px}
 .ok{font-size:13.5px;padding:8px 12px;border-radius:4px;background:var(--ok-soft);color:var(--ok)}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 <style>*,*::before,*::after{box-sizing:border-box}body{margin:0}[hidden]{display:none!important}code{font-family:var(--f-mono)}</style>
 </head>
 <body>
@@ -144,7 +145,7 @@ details[open] summary{margin-bottom:10px}
       <button class="primary" id="procesar">Procesar</button>
       <button id="limpiar">Limpiar</button>
     </div>
-    <p class="note">Formato aceptado: <code>01/09/2026-08:19:11-Alarma en zona 6</code>, o columnas copiadas de Excel (separadas por tabulación). La fila de encabezado se ignora.</p>
+    <p class="note">Formato aceptado: <code>dd/mm/aaaa-hh:mm:ss-Alarma en zona N</code>, o columnas copiadas de Excel (separadas por tabulación). La fila de encabezado se ignora.</p>
   </section>
 
   <section class="panel">
@@ -212,6 +213,12 @@ details[open] summary{margin-bottom:10px}
       <button id="regenerar">Volver a generar</button>
       <span class="status" id="estCopia"></span>
     </div>
+    <div class="row">
+      <button id="wordTexto">Descargar Word (solo texto)</button>
+      <button id="excel">Descargar Excel (tablas y datos)</button>
+      <span class="status" id="estDescarga"></span>
+    </div>
+    <p class="note">El Word de solo texto toma el informe tal como está arriba, sin tablas ni gráfico. El Excel trae el resumen, las tablas por zona (también en el formato horizontal del informe), el detalle diario, los otros eventos y el registro procesado. Ambos necesitan conexión a internet.</p>
     <details>
       <summary>Editar plantilla del informe</summary>
       <textarea id="plantilla" spellcheck="true"></textarea>
@@ -231,7 +238,7 @@ details[open] summary{margin-bottom:10px}
     <div id="avisoFinal"></div>
     <div class="paperwrap"><div class="paper" id="vistaFinal"></div></div>
     <div class="row">
-      <button class="primary" id="confirmarWord">Estoy conforme: descargar Word</button>
+      <button class="primary" id="confirmarWord">Estoy conforme: descargar Word completo</button>
       <button id="confirmarCopiar">Estoy conforme: copiar con tablas y gráfico</button>
       <button id="volverEditar">Volver a editar</button>
       <span class="status" id="estFinal"></span>
@@ -309,7 +316,7 @@ function calcular(filas,nZ){
   const media=totalAl/n;
   const desvio=n>1?Math.sqrt(alarma.reduce((s,x)=>s+(x-media)**2,0)/(n-1)):0;
   const sinRegistro=porDia.map((d,i)=>d.total?null:i+1).filter(Boolean);
-  return {anio,mes,total:filas.length,tipos,alarma,corte,totalAl,media,desvio,porDia,otros,sistema,sinRegistro,totalCorte:corte.reduce((a,b)=>a+b,0)};
+  return {filas,anio,mes,total:filas.length,tipos,alarma,corte,totalAl,media,desvio,porDia,otros,sistema,sinRegistro,totalCorte:corte.reduce((a,b)=>a+b,0)};
 }
 
 /* ---------- formato ---------- */
@@ -626,7 +633,7 @@ function descargarWord(){
     if(b.marca==='grafico') hijos.push(new D.Paragraph({alignment:D.AlignmentType.CENTER,spacing:{after:200},children:[new D.ImageRun({data:PNG.buffer,transformation:{width:620,height:212}})]}));
     else if(b.marca){hijos.push(tabla(b.marca));hijos.push(new D.Paragraph({children:[]}));}
     else hijos.push(new D.Paragraph({alignment:D.AlignmentType.JUSTIFIED,spacing:{after:200,line:300},
-      children:b.texto.split('\n').map((l,i)=>new D.TextRun({text:l,break:i?1:0,font:'Times New Roman',size:24}))}));
+      children:runsTexto(D,b.texto)}));
   });
   const doc=new D.Document({sections:[{properties:{page:{size:{width:11906,height:16838},margin:{top:1134,bottom:1134,left:1134,right:1134}}},children:hijos}]});
   st.textContent='Generando el archivo…';
@@ -659,6 +666,142 @@ $('confirmarWord').addEventListener('click',descargarWord);
 $('confirmarCopiar').addEventListener('click',copiarFinal);
 $('volverEditar').addEventListener('click',()=>{$('seccionFinal').hidden=true;$('salida').focus();$('salida').scrollIntoView({behavior:'smooth',block:'center'});});
 $('salida').addEventListener('input',()=>{$('seccionFinal').hidden=true;});
+
+/* ---------- descargas: Word solo texto y Excel ---------- */
+function descargarBlob(blob,nombre){
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=nombre;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+}
+const capi=s=>s?s[0].toUpperCase()+s.slice(1):s;
+function nombreArchivo(suf,ext){return `Informe_ALIARA_${capi(MESES[A.mes-1])}_${A.anio}${suf}.${ext}`;}
+function runsTexto(D,texto){
+  const runs=[];
+  texto.split('\n').forEach((l,i)=>{
+    l.split(/(\[Completar[^\]]*\])/i).filter(x=>x!=='').forEach((parte,j)=>{
+      runs.push(new D.TextRun({text:parte,break:(i&&j===0)?1:0,font:'Times New Roman',size:24,
+        highlight:/^\[Completar/i.test(parte)?'yellow':undefined}));
+    });
+    if(!l) runs.push(new D.TextRun({text:'',break:i?1:0}));
+  });
+  return runs;
+}
+function descargarWordTexto(){
+  const st=$('estDescarga');
+  if(!A){st.textContent='Primero procesá un registro.';return;}
+  const D=window.docx;
+  if(!D){st.textContent='No se pudo cargar el generador de Word. Revisá la conexión a internet y recargá la página.';return;}
+  const hijos=bloques().filter(b=>b.texto).map(b=>new D.Paragraph({alignment:D.AlignmentType.JUSTIFIED,spacing:{after:200,line:300},children:runsTexto(D,b.texto)}));
+  const doc=new D.Document({sections:[{properties:{page:{size:{width:11906,height:16838},margin:{top:1134,bottom:1134,left:1134,right:1134}}},children:hijos}]});
+  st.textContent='Generando el Word…';
+  D.Packer.toBlob(doc).then(blob=>{descargarBlob(blob,nombreArchivo('_texto','docx'));st.textContent='Word descargado.';})
+    .catch(()=>st.textContent='No se pudo generar el archivo de Word.');
+}
+async function descargarExcel(){
+  const st=$('estDescarga');
+  if(!A){st.textContent='Primero procesá un registro.';return;}
+  const X=window.ExcelJS;
+  if(!X){st.textContent='No se pudo cargar el generador de Excel. Revisá la conexión a internet y recargá la página.';return;}
+  st.textContent='Generando el Excel…';
+  try{
+    const wb=new X.Workbook(); wb.creator='Eventos ALIARA';
+    const MesC=capi(MESES[A.mes-1]), ant=anterior(), N=niveles(A);
+    const prom=dec2(A.media), desv=dec2(A.desvio), clima=parseFloat($('clima').value);
+    const fill=h=>({type:'pattern',pattern:'solid',fgColor:{argb:'FF'+h}});
+    const borde={top:{style:'thin'},left:{style:'thin'},bottom:{style:'thin'},right:{style:'thin'}};
+    const marcar=(row,n)=>{for(let k=1;k<=n;k++) row.getCell(k).border=borde;};
+    const encab=(row,n)=>{marcar(row,n);for(let k=1;k<=n;k++){const c=row.getCell(k);c.font={bold:true};c.fill=fill('E1EFEA');c.alignment={horizontal:'center',vertical:'middle',wrapText:true};}};
+    const pintar=(c,t)=>{if(!t)return;c.fill=fill(SOMBRA[t]);c.font=t===3?{bold:true,color:{argb:'FFFFFFFF'}}:{bold:true};};
+    const NIVEL=['','Por encima de la media','Concentración alta','Incidencia marcada'];
+    const prop=v=>A.totalAl?Math.round(v/A.totalAl*1000)/10:0;
+
+    /* Resumen */
+    const r=wb.addWorksheet('Resumen');
+    r.columns=[{width:40},{width:16},{width:18},{width:13}];
+    r.addRow([`Eventos ALIARA — ${MesC} ${A.anio}`]).font={bold:true,size:14};
+    r.addRow([]);
+    encab(r.addRow(['Indicador',MesC,capi(ant.nombre)||'Mes anterior','Variación']),4);
+    const comp=(lbl,act,prev,fmt)=>{const v=variacion(act,prev);const row=r.addRow([lbl,act,prev,v==null?null:v/100]);
+      row.getCell(2).numFmt=fmt;row.getCell(3).numFmt=fmt;row.getCell(4).numFmt='0.0%';marcar(row,4);};
+    comp('Total de eventos',A.total,ant.total,'#,##0');
+    comp('Promedio de alarmas por zona',prom,ant.media,'0.00');
+    comp('Desvío estándar de alarmas por zona (muestral)',desv,ant.desvio,'0.00');
+    r.addRow([]);
+    encab(r.addRow(['Indicador',MesC]),2);
+    const simple=(lbl,v,fmt)=>{const row=r.addRow([lbl,v]);if(fmt)row.getCell(2).numFmt=fmt;marcar(row,2);};
+    simple('Disparos de alarma',A.totalAl,'#,##0');
+    simple('Disparos de alarma sobre el total de eventos',A.total?A.totalAl/A.total:0,'0.0%');
+    simple('Cortes de cable',A.totalCorte,'#,##0');
+    simple('Zonas con cortes de cable',A.corte.filter(x=>x).length,'0');
+    simple('Eventos por clima y recurrentes (partes de guardia)',isFinite(clima)?clima:null,'#,##0');
+    simple('Clima y recurrentes sobre los disparos de alarma',isFinite(clima)&&A.totalAl?clima/A.totalAl:null,'0.0%');
+    simple('Días sin registros',A.sinRegistro.length?A.sinRegistro.map(d=>String(d).padStart(2,'0')+'/'+String(A.mes).padStart(2,'0')).join(', '):'Ninguno');
+    r.addRow([]);
+    encab(r.addRow(['Umbral (alarmas por zona)','Valor']),2);
+    simple('Media μ',Math.round(N.u1*100)/100,'0.00');
+    simple(`Concentración alta: μ + ${nf(N.k1,1)}·σ`,Math.round(N.u2*100)/100,'0.00');
+    simple(`Incidencia marcada: μ + ${nf(N.k2,1)}·σ`,Math.round(N.u3*100)/100,'0.00');
+
+    /* Por zona (vertical) */
+    const z=wb.addWorksheet('Por zona');
+    z.columns=[{width:9},{width:11},{width:15},{width:14},{width:24}];
+    encab(z.addRow(['Zona','Alarmas','Proporción (%)','Cable cortado','Nivel']),5);
+    A.alarma.forEach((v,i)=>{const t=N.tier(v);const row=z.addRow([`Z.${i+1}`,v,prop(v),A.corte[i],NIVEL[t]]);
+      row.getCell(3).numFmt='0.0';marcar(row,5);[1,2,3,4].forEach(k=>row.getCell(k).alignment={horizontal:'center'});
+      pintar(row.getCell(2),t);pintar(row.getCell(3),t);});
+    const tot=z.addRow(['Total',A.totalAl,100,A.totalCorte,'']);tot.font={bold:true};tot.getCell(3).numFmt='0.0';marcar(tot,5);
+    [1,2,3,4].forEach(k=>tot.getCell(k).alignment={horizontal:'center'});
+
+    /* Tablas del informe (horizontal) */
+    const h=wb.addWorksheet('Tablas informe'), nz=A.alarma.length;
+    h.columns=Array(nz).fill({width:7});
+    const tablaH=(titulo,vals,fmt,tiers)=>{
+      const t=h.addRow([titulo]); h.mergeCells(t.number,1,t.number,nz);
+      t.getCell(1).font={bold:true};t.getCell(1).alignment={horizontal:'center'};marcar(t,nz);
+      const e=h.addRow(vals.map((_,i)=>`Z.${i+1}`)); e.font={bold:true};marcar(e,nz);
+      const d=h.addRow(vals); d.font={bold:true};marcar(d,nz);
+      for(let k=1;k<=nz;k++){e.getCell(k).alignment=d.getCell(k).alignment={horizontal:'center'};d.getCell(k).numFmt=fmt;if(tiers)pintar(d.getCell(k),tiers[k-1]);}
+      h.addRow([]);
+    };
+    const tiers=A.alarma.map(v=>N.tier(v));
+    tablaH(`Alarma Zona ${MesC}`,A.alarma,'0',tiers);
+    tablaH(`Alarma Zona ${MesC} (Proporción)`,A.alarma.map(prop),'0.0',tiers);
+    tablaH(`Cable Cortado por Zona ${MesC}`,A.corte,'0',null);
+
+    /* Diario */
+    const di=wb.addWorksheet('Diario');
+    di.columns=[{width:13},{width:11},{width:14},{width:16},{width:16}];
+    encab(di.addRow(['Fecha','Alarmas','Cable cortado','Total de líneas','Observación']),5);
+    A.porDia.forEach((x,i)=>{const row=di.addRow([`${String(i+1).padStart(2,'0')}/${String(A.mes).padStart(2,'0')}/${A.anio}`,x.alarma,x.corte,x.total,x.total?'':'Sin registros']);
+      marcar(row,5);if(!x.total)for(let k=1;k<=5;k++)row.getCell(k).fill=fill('ECEFF0');});
+    const dt=di.addRow(['Total',A.porDia.reduce((s,x)=>s+x.alarma,0),A.porDia.reduce((s,x)=>s+x.corte,0),A.porDia.reduce((s,x)=>s+x.total,0),'']);dt.font={bold:true};marcar(dt,5);
+    const dp=di.addRow(['Promedio diario',Math.round(A.totalAl/A.porDia.length*10)/10]);dp.font={bold:true};dp.getCell(2).numFmt='0.0';marcar(dp,2);
+
+    /* Otros eventos */
+    const o=wb.addWorksheet('Otros eventos');
+    o.columns=[{width:48},{width:12},{width:40}];
+    encab(o.addRow(['Evento técnico (# = número)','Cantidad']),2);
+    Object.entries(A.otros).sort((a,b)=>b[1]-a[1]).forEach(([k,v])=>marcar(o.addRow([k,v]),2));
+    o.addRow([]);
+    o.addRow(['Encendidos y reinicios']).font={bold:true};
+    encab(o.addRow(['Fecha','Hora','Evento']),3);
+    if(A.sistema.length) A.sistema.forEach(f=>marcar(o.addRow([f.fecha,f.hora,f.evento]),3));
+    else o.addRow(['Sin encendidos ni reinicios registrados']);
+
+    /* Registro procesado */
+    const TIPO={alarma:'Alarma',corte:'Cable cortado',reconocida:'Zona reconocida',habilitada:'Zona habilitada',ronda:'Ronda',otro:'Otro'};
+    const g=wb.addWorksheet('Registro');
+    g.columns=[{width:12},{width:10},{width:60},{width:16},{width:7}];
+    encab(g.addRow(['Fecha','Hora','Evento','Tipo','Zona']),5);
+    A.filas.forEach(f=>g.addRow([f.fecha,f.hora,f.evento,TIPO[f.tipo],f.zona]));
+    g.autoFilter={from:'A1',to:'E1'}; g.views=[{state:'frozen',ySplit:1}];
+
+    const buf=await wb.xlsx.writeBuffer();
+    descargarBlob(new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),nombreArchivo('','xlsx'));
+    st.textContent='Excel descargado.';
+  }catch(e){console.error(e);st.textContent='No se pudo generar el Excel.';}
+}
+$('wordTexto').addEventListener('click',descargarWordTexto);
+$('excel').addEventListener('click',descargarExcel);
 
 /* ---------- eventos ---------- */
 $('procesar').addEventListener('click',procesar);
